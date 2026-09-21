@@ -1,0 +1,7 @@
+.env
+supabase/.temp/
+
+# Local project artifacts
+tmp/
+*.local
+.DS_Store
