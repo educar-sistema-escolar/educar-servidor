@@ -2,10 +2,11 @@
 
 ## Current backend and schema
 
-- The server repository is a Supabase/Postgres schema-only backend; there is no application server or Edge Function in this repository.
+- The server repository is a Supabase/Postgres backend with the Stage 1 provisioning Edge Function; there is no general application server in this repository.
 - `profiles` owns authentication-linked identity and the `app_role` enum. The existing role rename migration changes `authority` to `superadmin`; the safety migration prevents demoting or deactivating the last active superadmin.
 - Stage 1 provides `people`, `students`, `teachers`, academic catalog/enrollment tables, audit logs, timestamp/audit triggers, foreign keys, uniqueness constraints, and supporting indexes.
-- This Stage 2 slice adds nullable `people.dni` with normalized partial uniqueness, nullable `teachers.specialty`, and four superadmin-only JSONB RPCs for atomic student/teacher provisioning and updates.
+- Stage 1 account provisioning is delivered by the `admin-provision-user` Edge Function; it is not part of this Stage 2 database slice.
+- This Stage 2 slice adds nullable `people.dni` with normalized partial uniqueness, nullable `teachers.specialty`, atomic student/teacher provisioning RPCs, and persistent enrollment requests with a server-owned approval lifecycle.
 
 ## Audited files and data flow
 
@@ -14,6 +15,7 @@
 - `supabase/migrations/20260921174000_rename_authority_to_superadmin.sql`: pending role-name correction.
 - `supabase/migrations/20260921180000_stage2_superadmin_safety.sql`: pending last-active-superadmin lockout protection.
 - `supabase/migrations/20260921190000_stage2_admin_provisioning.sql`: this stage's identity fields and transactional RPCs.
+- `supabase/migrations/20260921220000_stage2_enrollment_requests.sql`: persistent request lifecycle, superadmin RPC boundary, and atomic approval/enrollment.
 - Client flow reviewed with this schema: `academicRepository.ts` previously performed separate `people` and role-table writes, so a failed second write could orphan a person row.
 
 ## RLS and authorization audit
@@ -22,22 +24,23 @@
 - The RPCs use `SECURITY DEFINER`, `search_path = public`, and an explicit `is_active_superadmin()` check. Their related person/role writes occur in one database function call, so an error aborts the transaction rather than leaving a partial role.
 - Direct table grants and existing RLS policies remain unchanged; no unrelated domain is widened by this migration.
 
-## Stage 2 plan
+## Stage 2 enrollment lifecycle
 
-1. Preserve and apply the role rename and last-superadmin safety migrations.
-2. Apply the provisioning migration after them.
-3. Exercise authenticated superadmin and non-superadmin RPC calls against a disposable/local database.
-4. Add transport/UI integration only in the owning client repository; this server slice intentionally adds no Edge Function.
+1. Apply the role rename, last-superadmin safety, provisioning, closure, and enrollment-request migrations in timestamp order.
+2. Accept public submissions only through `submit_enrollment_request(jsonb)`; table RLS remains active-superadmin-only.
+3. Exercise authenticated superadmin and non-superadmin request RPC calls against a disposable/local database.
+4. Approve with an explicit active course; the RPC locks the request/course and creates or reuses the student and enrollment atomically.
 
 ## Stage 2 acceptance checklist
 
 - [x] Superadmin-only RPC authorization is explicit and active-user aware.
 - [x] Student and teacher create/update operations are atomic within one database function call.
 - [x] DNI uniqueness is enforced at the database boundary when supplied.
+- [x] Enrollment request persistence and pending/approved/rejected/archived transitions are defined.
+- [x] Approval creates or reuses the student and active enrollment in one transaction with course/year/capacity checks.
 - [x] Existing direct table RLS/grants are not widened by this migration.
 - [ ] Apply migrations in timestamp order and verify `director@educar.com` is `superadmin` and active.
-- [ ] Run disposable-database tests for allowed superadmin calls, rejected non-superadmin calls, duplicate DNI, rollback, and last-superadmin protection.
-- [ ] Add business constraints for academic-year consistency, inactive assignments, and capacity after the rules are confirmed.
+- [ ] Run disposable-database tests for allowed superadmin calls, rejected non-superadmin calls, duplicate DNI, approval rollback, capacity, and last-superadmin protection.
 
 ## Migration application caveat
 
@@ -49,7 +52,7 @@ Static checks are limited to repository diff/whitespace and SQL shape inspection
 
 ## Later stages
 
-- **Stage 3 — Users and permissions:** trusted account provisioning, role assignment, activation/deactivation UI, and complete authorization tests.
+- **Stage 3 — Users and permissions:** permission-management UI, complete authorization tests, and audit-log operations.
 - **Stage 4 — Activities and schedules:** server-backed sports, activities, schedules, and participation flows.
 - **Stage 5 — Transport and cafeteria:** routes, service assignments, availability, attendance, and operational administration.
 - **Stage 6 — Reports:** permission-aware student, teacher, course, subject, sport, service, and export/reporting views.
@@ -57,9 +60,9 @@ Static checks are limited to repository diff/whitespace and SQL shape inspection
 
 ## Canonical Stage 1 closure
 
-Stage 1 database/integrity closure is migration `20260921200000_stage1_closure.sql`, after the existing Stage 2 provisioning migration. The canonical administrative role is `superadmin`; this scope adds no Node API and no automatic Auth provisioning, and does not alter sports, transport, dining, or reports. **Canonical status: SQL/seed/docs closure prepared locally; runtime acceptance is still pending.**
+Stage 1 database/integrity closure is migration `20260921200000_stage1_closure.sql`, after the existing Stage 2 provisioning migration. The canonical administrative role is `superadmin`; account provisioning is delivered by the Stage 1 Edge Function, while this Stage 2 scope adds no Node API and does not alter sports, transport, dining, or reports. **Canonical status: SQL/seed/docs closure prepared locally; runtime acceptance is still pending.**
 
-Exact migration order: `20260911210000_init_profiles_roles.sql` → `20260921150000_stage1_administrative_schema.sql` → `20260921174000_rename_authority_to_superadmin.sql` → `20260921180000_stage2_superadmin_safety.sql` → `20260921190000_stage2_admin_provisioning.sql` → `20260921200000_stage1_closure.sql`.
+Exact migration order: `20260911210000_init_profiles_roles.sql` → `20260921150000_stage1_administrative_schema.sql` → `20260921174000_rename_authority_to_superadmin.sql` → `20260921180000_stage2_superadmin_safety.sql` → `20260921190000_stage2_admin_provisioning.sql` → `20260921200000_stage1_closure.sql` → `20260921220000_stage2_enrollment_requests.sql`.
 
 The closure adds only missing `birth_date` and `must_change_password`, enforces enrollment and course-subject integrity (academic year, active references, capacity including capacity reductions, and uniqueness), protects logical deletion references, audits only profile role/activity changes without secret fields, and extends last-active-superadmin protection to deletion. `supabase/seed.sql` provides idempotent development academic data without Auth credentials. See `tests/stage1-acceptance.md` for the manual checklist.
 
