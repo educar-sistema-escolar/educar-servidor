@@ -54,3 +54,13 @@ Static checks are limited to repository diff/whitespace and SQL shape inspection
 - **Stage 5 — Transport and cafeteria:** routes, service assignments, availability, attendance, and operational administration.
 - **Stage 6 — Reports:** permission-aware student, teacher, course, subject, sport, service, and export/reporting views.
 - **Stage 7 — Production hardening:** audit-log review, observability, performance, backups/recovery, migration rehearsal, security review, and end-to-end release verification.
+
+## Canonical Stage 1 closure
+
+Stage 1 database/integrity closure is migration `20260921200000_stage1_closure.sql`, after the existing Stage 2 provisioning migration. The canonical administrative role is `superadmin`; this scope adds no Node API and no automatic Auth provisioning, and does not alter sports, transport, dining, or reports. **Canonical status: SQL/seed/docs closure prepared locally; runtime acceptance is still pending.**
+
+Exact migration order: `20260911210000_init_profiles_roles.sql` → `20260921150000_stage1_administrative_schema.sql` → `20260921174000_rename_authority_to_superadmin.sql` → `20260921180000_stage2_superadmin_safety.sql` → `20260921190000_stage2_admin_provisioning.sql` → `20260921200000_stage1_closure.sql`.
+
+The closure adds only missing `birth_date` and `must_change_password`, enforces enrollment and course-subject integrity (academic year, active references, capacity including capacity reductions, and uniqueness), protects logical deletion references, audits only profile role/activity changes without secret fields, and extends last-active-superadmin protection to deletion. `supabase/seed.sql` provides idempotent development academic data without Auth credentials. See `tests/stage1-acceptance.md` for the manual checklist.
+
+Runtime Supabase application and acceptance checks remain pending because this repository has no executable database harness. Static inspection and `git diff --check` do not claim runtime success. `supabase/seed.sql` is development-only and creates no Auth users, passwords, or service-role code.

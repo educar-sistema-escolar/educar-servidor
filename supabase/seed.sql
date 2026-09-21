@@ -1,1 +1,19 @@
--- Seed data will be added when the first server-backed feature is implemented.
+-- Development-only, idempotent academic fixtures. No Auth users or passwords.
+do $$
+declare l_initial uuid; l_primary uuid; l_secondary uuid; c_initial uuid; c_primary uuid; c_secondary uuid; math_id uuid; language_id uuid; science_id uuid; teacher_id uuid; student_id uuid; person_teacher uuid := '00000000-0000-0000-0000-000000000031'; person_student uuid := '00000000-0000-0000-0000-000000000032';
+begin
+  insert into public.educational_levels(id,code,name,sort_order) values ('00000000-0000-0000-0000-000000000001','initial','Initial',1) on conflict(code) do update set name=excluded.name,sort_order=excluded.sort_order returning id into l_initial;
+  insert into public.educational_levels(id,code,name,sort_order) values ('00000000-0000-0000-0000-000000000002','primary','Primary',2) on conflict(code) do update set name=excluded.name,sort_order=excluded.sort_order returning id into l_primary;
+  insert into public.educational_levels(id,code,name,sort_order) values ('00000000-0000-0000-0000-000000000003','secondary','Secondary',3) on conflict(code) do update set name=excluded.name,sort_order=excluded.sort_order returning id into l_secondary;
+  insert into public.courses(id,educational_level_id,code,name,academic_year,year_number,capacity) values ('00000000-0000-0000-0000-000000000011',l_initial,'A','Initial A',2026,1,30) on conflict(educational_level_id,code,academic_year) do update set name=excluded.name,capacity=excluded.capacity returning id into c_initial;
+  insert into public.courses(id,educational_level_id,code,name,academic_year,year_number,capacity) values ('00000000-0000-0000-0000-000000000012',l_primary,'A','Primary A',2026,1,30) on conflict(educational_level_id,code,academic_year) do update set name=excluded.name,capacity=excluded.capacity returning id into c_primary;
+  insert into public.courses(id,educational_level_id,code,name,academic_year,year_number,capacity) values ('00000000-0000-0000-0000-000000000013',l_secondary,'A','Secondary A',2026,1,30) on conflict(educational_level_id,code,academic_year) do update set name=excluded.name,capacity=excluded.capacity returning id into c_secondary;
+  insert into public.subjects(id,code,name) values ('00000000-0000-0000-0000-000000000021','math','Mathematics') on conflict(code) do update set name=excluded.name returning id into math_id;
+  insert into public.subjects(id,code,name) values ('00000000-0000-0000-0000-000000000022','language','Language') on conflict(code) do update set name=excluded.name returning id into language_id;
+  insert into public.subjects(id,code,name) values ('00000000-0000-0000-0000-000000000023','science','Science') on conflict(code) do update set name=excluded.name returning id into science_id;
+  insert into public.people(id,first_name,last_name,email,birth_date) values(person_teacher,'Ana','Docente','ana.docente@example.test','1985-04-12'),(person_student,'Luis','Estudiante','luis.estudiante@example.test','2016-08-20') on conflict(id) do update set first_name=excluded.first_name,last_name=excluded.last_name,email=excluded.email,birth_date=excluded.birth_date;
+  insert into public.teachers(id,person_id,teacher_number,specialty) values('00000000-0000-0000-0000-000000000041',person_teacher,'T-001','General') on conflict(id) do update set person_id=excluded.person_id,teacher_number=excluded.teacher_number,specialty=excluded.specialty returning id into teacher_id;
+  insert into public.students(id,person_id,student_number) values('00000000-0000-0000-0000-000000000042',person_student,'S-001') on conflict(id) do update set person_id=excluded.person_id,student_number=excluded.student_number returning id into student_id;
+  insert into public.course_subjects(course_id,subject_id,teacher_id,academic_year) values(c_initial,math_id,teacher_id,2026),(c_primary,language_id,teacher_id,2026),(c_secondary,science_id,teacher_id,2026) on conflict do nothing;
+  insert into public.student_enrollments(student_id,course_id,academic_year) values(student_id,c_primary,2026) on conflict(student_id,academic_year) where is_active do nothing;
+end $$;
