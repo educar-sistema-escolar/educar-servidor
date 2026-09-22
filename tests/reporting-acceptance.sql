@@ -6,6 +6,11 @@ select public.get_admin_report('teachers_by_level');
 select public.get_admin_report('students_by_sport_schedule');
 select public.get_admin_report('students_by_transport');
 select public.get_admin_report('student_overview');
+select public.get_admin_report('teachers_by_level_courses', '{}'::jsonb);
+select public.get_admin_report('teachers_by_course_schedule', '{}'::jsonb);
+select public.get_admin_report('students_by_sport_level', '{}'::jsonb);
+select public.get_admin_report('students_by_sport_schedule_teacher', '{}'::jsonb);
+select public.get_admin_report('transport_and_dining', '{}'::jsonb);
 
 -- An unsupported report code must fail with invalid_parameter_value.
 select public.get_admin_report('unsupported_report');
