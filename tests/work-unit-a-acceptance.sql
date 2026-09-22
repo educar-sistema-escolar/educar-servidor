@@ -1,5 +1,10 @@
--- Run with a privileged test role in a disposable Supabase database.
+-- Run through an authenticated session whose auth.uid() belongs to an active
+-- superadmin profile in a disposable Supabase database. A SQL Editor postgres
+-- session is privileged at the database level but is not an application superadmin.
 -- Replace the UUID placeholders with active fixtures before executing.
+
+-- The negative statements below are intentionally expected to fail. Run each
+-- independently, or wrap it in a DO block when executing the full file.
 
 -- Duplicate active subject enrollment: expect unique_violation.
 select public.enroll_student_in_subject(

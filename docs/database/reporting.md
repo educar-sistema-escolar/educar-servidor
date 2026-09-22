@@ -2,7 +2,7 @@
 
 `get_admin_report(report_code)` exposes real, permission-protected report rows as JSON for the admin client.
 
-The completed overload `get_admin_report(report_code, filters)` accepts optional `academic_year`, `level_id`, `sport_id`, and `route_id` filters. Existing one-argument calls remain compatible.
+The completed overload `get_admin_report(report_code, filters)` accepts optional `academic_year`, `level_id`, `sport_id`, and `route_id` filters. The filters argument is required at the SQL signature level, so existing one-argument calls remain unambiguous.
 
 Supported report codes:
 
@@ -19,4 +19,4 @@ Supported report codes:
 - `students_by_sport_schedule_teacher`
 - `transport_and_dining`
 
-The function requires an active `superadmin`. Exporting is intentionally kept in the client as CSV serialization of these rows; it does not create a second data source.
+The report RPC requires an active `superadmin` or the `reports:read` permission. Exporting is intentionally kept in the client as CSV serialization of these rows; it does not create a second data source.
