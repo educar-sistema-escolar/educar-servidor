@@ -11,10 +11,10 @@ The function validates the caller's JWT and requires an active `superadmin` prof
 1. A superadmin submits an email, name, and role.
 2. Supabase Auth sends an invitation email.
 3. The Auth trigger creates the profile with its default role.
-4. The function updates the profile with the requested role and active status.
-5. If profile setup fails, the invited Auth user is deleted so an unusable account is not left behind.
+4. The function performs the profile/person/domain link through the server-side `link_provisioned_identity` RPC and marks new accounts as invited.
+5. If linking or status setup fails for a newly invited user, the Auth user is deleted so an unusable account is not left behind.
 
-The current stage supports role assignment, not teacher/student/parent portals. The `admin` role is intentionally not available yet.
+The current stage supports role assignment and identity linking for teacher/student/guardian accounts; teacher/student/parent portals remain future work. The `admin` role is a permission-catalog role only and is intentionally not a profile enum value.
 
 ## Required function secrets
 
