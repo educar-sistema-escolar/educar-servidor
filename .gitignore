@@ -3,5 +3,6 @@ supabase/.temp/
 
 # Local project artifacts
 tmp/
+.codebase-memory/
 *.local
 .DS_Store

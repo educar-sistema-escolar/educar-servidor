@@ -169,9 +169,14 @@ Deno.serve(async (request) => {
     return response({ account: account as Profile, invited: false, idempotent: true }, 200);
   }
 
+  const applicationOrigin = request.headers.get('origin')?.replace(/\/$/, '')
+    || Deno.env.get('APP_URL')?.replace(/\/$/, '');
   const { data: invitation, error: invitationError } = await adminClient.auth.admin.inviteUserByEmail(
     email,
-    { data: { full_name: fullName } },
+    {
+      data: { full_name: fullName },
+      ...(applicationOrigin ? { redirectTo: `${applicationOrigin}/login?mode=reset` } : {}),
+    },
   );
 
   if (invitationError || !invitation.user) return safeProvisionError(400);
