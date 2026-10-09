@@ -1,4 +1,5 @@
 begin;
+alter table public.transfer_submissions add column reviewed_at timestamptz;
 create unique index billing_values_tuition_effective_idx on public.billing_values(concept,effective_from) where service_id is null;
 alter table public.billing_values add constraint billing_values_safe_amount check(amount_cents<=9007199254740991);
 alter table public.invoice_items add constraint invoice_items_safe_amount check(amount_cents<=9007199254740991);
@@ -23,7 +24,7 @@ begin
   end loop;
   if remaining<>0 then raise exception 'Amount could not be allocated'; end if;
  end if;
- update public.transfer_submissions set status=case when p_approve then 'approved' else 'rejected' end where id=p_submission;
+ update public.transfer_submissions set reviewed_at=now(),status=case when p_approve then 'approved' else 'rejected' end where id=p_submission;
 end;$$;
 create or replace function public.issue_monthly_invoice(p_student uuid,p_period date,p_due date) returns uuid language plpgsql security definer set search_path=pg_catalog,public as $$
 declare result uuid;
