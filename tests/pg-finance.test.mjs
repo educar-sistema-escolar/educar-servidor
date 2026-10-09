@@ -9,7 +9,7 @@ const bin=process.env.TEST_PG_BIN || 'C:/Program Files/PostgreSQL/18/bin';
 const executable=name=>path.join(bin,`${name}${process.platform==='win32'?'.exe':''}`);
 const id=n=>`81000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 test('actual PostgreSQL financial migrations enforce family RLS and atomic partial payments',async()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'educar-finance-test-'));const data=path.join(root,'data');let started=false;
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'educar-finance-test-'));const data=path.join(root,'data');let started=false;let primary;
  const server=net.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));
  const run=(name,args,input)=>{const result=spawnSync(executable(name),args,{input,encoding:'utf8',timeout:60000,...(name==='pg_ctl'?{stdio:'ignore'}:{})});if(result.error)throw result.error;assert.equal(result.status,0,`${name}: ${(result.stderr||result.stdout||'process failed').slice(-1800)}`);return (result.stdout||'').trim();};
  const args=['-h','127.0.0.1','-p',String(port),'-U','fixture_admin','-d','postgres','-X','-q','-t','-A','-v','ON_ERROR_STOP=1'];
@@ -39,10 +39,26 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   sql(`update profiles set is_active=true where id='${id(1)}';`);
   as(2,`insert into billing_values(concept,label,amount_cents,effective_from) values('tuition','New tuition',12000,'2026-11-01');select issue_monthly_invoice('${id(21)}','2026-11-01','2026-11-10');`);
   assert.equal(sql(`select amount_cents from invoice_items where invoice_id='${id(31)}';`),'10000');
-  console.log('PG18: real financial migration chain, authenticated RLS, 14 business assertions PASS; platform compatibility fixtures, not Supabase HTTP proof.');
+  const pendingInvoice=sql(`select id from invoices where student_id='${id(21)}' and period='2026-11-01';`);
+  const pendingItem=sql(`select id from invoice_items where invoice_id='${pendingInvoice}';`);
+  sql(`insert into storage.objects(bucket_id,name,owner_id) values('transfer-receipts','${id(1)}/race.pdf','${id(1)}'),('transfer-receipts','${id(1)}/extra.pdf','${id(1)}');`);
+  const raceSubmit=`select submit_transfer('${pendingInvoice}',array['${pendingItem}']::uuid[],1000,'RACE','${id(1)}/race.pdf','race.pdf');`;
+  const concurrent=(n,text)=>new Promise((resolve,reject)=>{const child=spawn(executable('psql'),args,{stdio:['pipe','pipe','pipe']});let stdout='',stderr='';const timer=setTimeout(()=>{child.kill();reject(new Error('Concurrent SQL timed out'));},15000);child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);child.on('error',reject);child.on('close',code=>{clearTimeout(timer);resolve({code,stdout,stderr});});child.stdin.end(`set application_name='finance-first';set role authenticated;select set_config('request.jwt.claim.sub','${id(n)}',false);${text}`);});
+  const sleeping=async()=>{for(let attempts=0;attempts<20;attempts++){if(sql("select count(*) from pg_stat_activity where application_name='finance-first' and wait_event='PgSleep';")==='1')return;await new Promise(r=>setTimeout(r,50));}throw new Error('First connection never held transaction lock');};
+  const first=concurrent(1,`begin;${raceSubmit}select pg_sleep(3);commit;`);await sleeping();
+  const second=concurrent(1,raceSubmit);const both=await Promise.all([first,second]);assert.ok(both.every(x=>x.code===0));assert.equal(sql("select count(*) from transfer_submissions where reference='RACE';"),'1');
+  const raceId=sql("select id from transfer_submissions where reference='RACE';");
+  const reviewing=concurrent(2,`begin;select review_transfer('${raceId}',true);select pg_sleep(3);commit;`);await sleeping();
+  const attachment=concurrent(1,`select attach_transfer_receipt('${raceId}','${id(1)}/extra.pdf','extra.pdf');`);
+  const reviewed=await reviewing;assert.equal(reviewed.code,0);const attached=await attachment;assert.notEqual(attached.code,0);assert.match(attached.stderr,/Submission access denied/);
+  assert.equal(sql(`select paid_cents from invoice_items where id='${pendingItem}';`),'1000');
+  console.log('PG18 financial migrations, authenticated RLS, partial allocation, idempotency and two-connection locking PASS. Supabase platform compatibility fixtures only.');
+ }catch(error){primary=error;throw error;
  }finally{
+  try {
   if(started)run('pg_ctl',['-D',data,'-m','immediate','-w','stop']);
   const resolved=path.resolve(root);assert.ok(resolved.startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('educar-finance-test-'));
   fs.rmSync(resolved,{recursive:true,force:true,maxRetries:10,retryDelay:200});assert.equal(fs.existsSync(resolved),false);console.log('Owned disposable cluster stopped and verified temporary directory removed.');
+  }catch(cleanup){if(primary)console.error('Cleanup failed after primary error:',cleanup.message);else throw cleanup;}
  }
 });
