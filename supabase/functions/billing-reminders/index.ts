@@ -26,6 +26,7 @@ Deno.serve(async (request) => {
         if (error)
             throw error;
         let sent = 0;
+        let queueFailure = false;
         for (const reminder of queue ?? []) {
             const claimed = await client.from('billing_reminders').update({ status: 'sending' }).eq('id', reminder.id).eq('status', 'ready').select('id');
             if (claimed.error)
@@ -70,23 +71,26 @@ Deno.serve(async (request) => {
                     }
             }
             catch {
-                await client.from('billing_reminders').update({ status: 'ready' }).eq('id', reminder.id);
+                const reset = await client.from('billing_reminders').update({ status: 'ready' }).eq('id', reminder.id);
+                if (reset.error) queueFailure = true;
                 continue;
             }
             try {
                 const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `billing/${reminder.id}` }, body: JSON.stringify({ from: sender, to: [reminder.recipient], subject: reminder.kind === 'debt' ? 'EDUCAR · Outstanding balance' : 'EDUCAR · Monthly invoice', text, attachments }), signal: AbortSignal.timeout(15000) });
                 if (!response.ok) {
-                    await client.from('billing_reminders').update({ status: 'failed' }).eq('id', reminder.id);
+                    const status = response.status === 429 ? 'ready' : response.status >= 500 || response.status === 408 ? 'sending' : 'failed';
+                    const rejected = await client.from('billing_reminders').update({ status }).eq('id', reminder.id);
+                    if (rejected.error) queueFailure = true;
                     continue;
                 }
                 const result = await response.json();
                 const updated = await client.from('billing_reminders').update({ status: 'sent', provider_id: result.id }).eq('id', reminder.id);
-                if (updated.error)
-                    throw updated.error;
+                if (updated.error) { queueFailure = true; throw updated.error; }
                 sent++;
             }
             catch { /* A sending row is intentionally retained for manual reconciliation after an ambiguous provider outcome. */ }
         }
+        if (queueFailure) throw new Error('Queue state could not be persisted.');
         return Response.json({ prepared: preparedCount, sent });
     }
     catch {
