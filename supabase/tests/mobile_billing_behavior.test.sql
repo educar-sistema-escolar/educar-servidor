@@ -1,7 +1,7 @@
 begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path=public,extensions;
-select plan(12);
+select plan(16);
 insert into auth.users(id,instance_id,aud,role,email,encrypted_password,email_confirmed_at,raw_app_meta_data,raw_user_meta_data,created_at,updated_at) values
 ('81000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-000000000000','authenticated','authenticated','billing.parent@example.test','',now(),'{"provider":"email"}','{}',now(),now()),
 ('81000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-000000000000','authenticated','authenticated','billing.admin@example.test','',now(),'{"provider":"email"}','{}',now(),now());
@@ -37,5 +37,15 @@ update public.profiles set is_active=false where id='81000000-0000-4000-8000-000
 select set_config('request.jwt.claim.sub','81000000-0000-4000-8000-000000000001',true);
 set local role authenticated;
 select throws_ok($$select public.submit_transfer('81000000-0000-4000-8000-000000000031',array['81000000-0000-4000-8000-000000000041']::uuid[],5000,'INACTIVE','81000000-0000-4000-8000-000000000001/test.pdf','test.pdf')$$,'42501','Invoice access denied','Inactive parent submission denied');
+reset role;
+update public.profiles set is_active=true where id='81000000-0000-4000-8000-000000000001';
+insert into public.billing_non_business_days(day,label) values('2026-10-30','Synthetic school holiday');
+select set_config('request.jwt.claim.role','service_role',true);
+select lives_ok($$select public.prepare_billing_reminders('2026-10-29')$$,'Holiday-adjusted last business date prepares reminders');
+select is((select count(*) from public.billing_reminders where guardian_id='81000000-0000-4000-8000-000000000001' and kind='month_end' and reminder_date='2026-10-29'),1::bigint,'Holiday calendar moves month-end reminder');
+select lives_ok($$select public.prepare_billing_reminders('2026-10-20')$$,'Day 20 debt reminder prepares');
+update public.invoice_items set paid_cents=amount_cents where invoice_id='81000000-0000-4000-8000-000000000031';
+select public.prepare_billing_reminders('2026-11-20');
+select is((select count(*) from public.billing_reminders where guardian_id='81000000-0000-4000-8000-000000000001' and kind='debt' and reminder_date='2026-11-20'),0::bigint,'Fully paid family receives no debt reminder');
 select * from finish();
 rollback;
