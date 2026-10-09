@@ -11,7 +11,6 @@ create table public.profiles(id uuid primary key,full_name text,email text,role 
 create table public.people(id uuid primary key,profile_id uuid references profiles,first_name text,last_name text,is_active boolean default true);
 create table public.students(id uuid primary key,person_id uuid references people,is_active boolean default true);
 create table public.student_guardians(student_id uuid references students,guardian_person_id uuid references people,is_active boolean default true);
-create function public.is_guardian_of_student(student uuid) returns boolean language sql stable security definer as $$select exists(select 1 from student_guardians g join people p on p.id=g.guardian_person_id where g.student_id=student and g.is_active and p.is_active and p.profile_id=auth.uid())$$;
 create table public.sports(id uuid primary key,name text);
 create table public.educational_levels(id uuid primary key,name text);
 create table public.teachers(id uuid primary key,person_id uuid);
