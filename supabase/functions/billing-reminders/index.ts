@@ -59,6 +59,9 @@ Deno.serve(async (request) => {
                         line(`Issued account statement ${date}`);
                         line('Transfer payments require school verification.');
                         const rows = items.filter(i => i.invoice_id === invoiceId);
+                        line(`Student: ${rows[0]?.student_name ?? 'Unknown'}`);
+                        line(`Period: ${rows[0]?.period ?? 'Unknown'}`);
+                        line(`Due date: ${rows[0]?.due_date ?? 'Unknown'}`);
                         for (const item of rows) {
                             line(`${item.label}: ARS ${(item.amount_cents / 100).toFixed(2)} / paid ${(item.paid_cents / 100).toFixed(2)}`);
                         }
