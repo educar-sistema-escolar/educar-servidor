@@ -33,6 +33,11 @@ begin
  if p_period<>date_trunc('month',p_period)::date then raise exception 'Period must be the first day of a month'; end if;
  if not exists(select 1 from public.students where id=p_student and is_active) then raise exception 'Active student required'; end if;
  if not exists(select 1 from public.billing_values where concept='tuition' and service_id is null and effective_from<=p_period) then raise exception 'Configure tuition before issuing invoices'; end if;
+ if exists(select 1 from (
+  select 'sport' concept,sport_group_id service_id from public.student_sport_enrollments where student_id=p_student and is_active and academic_year=extract(year from p_period)
+  union all select 'transport',route_id from public.student_transport_enrollments where student_id=p_student and is_active and academic_year=extract(year from p_period)
+  union all select 'dining',dining_service_id from public.student_dining_enrollments where student_id=p_student and is_active and academic_year=extract(year from p_period)
+ ) enrolled where not exists(select 1 from public.billing_values price where price.concept=enrolled.concept and price.service_id=enrolled.service_id and price.effective_from<=p_period)) then raise exception 'Configure all enrolled service prices before issuing invoices';end if;
  insert into public.invoices(student_id,period,due_date) values(p_student,p_period,p_due) returning id into result;
  insert into public.invoice_items(invoice_id,concept,service_id,label,amount_cents)
  select result,chosen.concept,chosen.service_id,chosen.label,chosen.amount_cents from (
