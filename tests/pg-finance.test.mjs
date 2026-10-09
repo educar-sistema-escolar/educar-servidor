@@ -54,6 +54,7 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   const attachment=concurrent(1,`select attach_transfer_receipt('${raceId}','${id(1)}/extra.pdf','extra.pdf');`);
   const reviewed=await reviewing;assert.equal(reviewed.code,0);const attached=await attachment;assert.notEqual(attached.code,0);assert.match(attached.stderr,/Submission access denied/);
   assert.equal(sql(`select paid_cents from invoice_items where id='${pendingItem}';`),'1000');
+  sql(`update invoice_items set paid_cents=amount_cents where invoice_id='${id(31)}';insert into invoices(id,student_id,period,due_date) values('${id(33)}','${id(21)}','2026-09-01','2026-09-10');insert into invoice_items(invoice_id,concept,label,amount_cents) values('${id(33)}','tuition','Old debt',2000);select set_config('request.jwt.claim.role','service_role',false);select prepare_billing_reminders('2026-10-30');`);assert.equal(sql("select count(*) from billing_reminders where kind='month_end' and reminder_date='2026-10-30';"),'1','Paid current month must still receive its invoice');assert.equal(sql("select payload->>'total_cents' from billing_reminders where kind='month_end' and reminder_date='2026-10-30';"),'0','Monthly total excludes historic debt');
   console.log('PG18 financial migrations, authenticated RLS, partial allocation, idempotency and two-connection locking PASS. Supabase platform compatibility fixtures only.');
  }catch(error){primary=error;throw error;
  }finally{
