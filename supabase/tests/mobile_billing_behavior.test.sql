@@ -1,7 +1,7 @@
 begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path=public,extensions;
-select plan(16);
+select plan(18);
 insert into auth.users(id,instance_id,aud,role,email,encrypted_password,email_confirmed_at,raw_app_meta_data,raw_user_meta_data,created_at,updated_at) values
 ('81000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-000000000000','authenticated','authenticated','billing.parent@example.test','',now(),'{"provider":"email"}','{}',now(),now()),
 ('81000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-000000000000','authenticated','authenticated','billing.admin@example.test','',now(),'{"provider":"email"}','{}',now(),now());
@@ -26,6 +26,8 @@ select is((select status from public.transfer_submissions where reference='BANK-
 select is((select paid_cents from public.invoice_items where id='81000000-0000-4000-8000-000000000041'),0::bigint,'Pending transfer leaves paid cents unchanged');
 select lives_ok($$select public.submit_transfer('81000000-0000-4000-8000-000000000031',array['81000000-0000-4000-8000-000000000041']::uuid[],5000,'BANK-TEST','81000000-0000-4000-8000-000000000001/test.pdf','test.pdf')$$,'Identical retry is idempotent');
 select is((select count(*) from public.transfer_submissions where reference='BANK-TEST'),1::bigint,'Retry creates no duplicate');
+select lives_ok($$select public.attach_transfer_receipt((select id from public.transfer_submissions where reference='BANK-TEST'),'81000000-0000-4000-8000-000000000001/test.pdf','test.pdf')$$,'Identical receipt attachment retry is idempotent');
+select throws_ok($$select public.attach_transfer_receipt((select id from public.transfer_submissions where reference='BANK-TEST'),'81000000-0000-4000-8000-000000000001/test.pdf','changed.pdf')$$,'P0001','Receipt is already associated with another operation or filename','Changed attachment payload is rejected');
 select throws_ok($$select public.submit_transfer('81000000-0000-4000-8000-000000000031',array['81000000-0000-4000-8000-000000000041']::uuid[],4000,'BANK-TEST','81000000-0000-4000-8000-000000000001/test.pdf','test.pdf')$$,'P0001','Transfer reference already belongs to a different operation','Changed duplicate payload rejected');
 reset role;
 select set_config('request.jwt.claim.sub','81000000-0000-4000-8000-000000000002',true);

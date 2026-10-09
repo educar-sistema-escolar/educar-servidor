@@ -47,10 +47,17 @@ begin
  return result;
 end; $$;
 create or replace function public.attach_transfer_receipt(p_submission uuid,p_path text,p_filename text) returns uuid language plpgsql security definer set search_path=pg_catalog,public as $$
-declare result uuid;
+declare result uuid; invoice_value uuid; existing public.transfer_receipts;
 begin
+ select invoice_id into invoice_value from public.transfer_submissions where id=p_submission and guardian_id=auth.uid();
+ if invoice_value is null then raise exception 'Submission access denied' using errcode='42501';end if;
+ perform 1 from public.invoices where id=invoice_value for update;
+ perform 1 from public.transfer_submissions where id=p_submission for update;
  if not exists(select 1 from public.transfer_submissions where id=p_submission and guardian_id=auth.uid() and status='pending' and public.can_read_invoice(invoice_id)) then raise exception 'Submission access denied' using errcode='42501'; end if;
  if split_part(p_path,'/',1)<>auth.uid()::text or not exists(select 1 from storage.objects where bucket_id='transfer-receipts' and name=p_path and owner_id=auth.uid()::text) then raise exception 'Invalid receipt ownership'; end if;
+ if p_filename is null or length(p_filename) not between 1 and 200 then raise exception 'Invalid receipt filename';end if;
+ select * into existing from public.transfer_receipts where storage_path=p_path;
+ if existing.id is not null then if existing.submission_id=p_submission and existing.filename=p_filename then return existing.id;end if;raise exception 'Receipt is already associated with another operation or filename';end if;
  insert into public.transfer_receipts(submission_id,storage_path,filename) values(p_submission,p_path,p_filename) returning id into result; return result;
 end; $$;
 revoke all on function public.submit_transfer(uuid,uuid[],bigint,text,text,text),public.attach_transfer_receipt(uuid,text,text) from public;
