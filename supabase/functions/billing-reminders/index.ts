@@ -1,3 +1,4 @@
+import { PDFDocument, StandardFonts } from 'npm:pdf-lib@1.17.1';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 const required=(key:string)=>{const value=Deno.env.get(key);if(!value)throw new Error(`Missing server configuration: ${key}`);return value;};
 Deno.serve(async(request)=>{
@@ -13,10 +14,17 @@ Deno.serve(async(request)=>{
   const claimed=await client.from('billing_reminders').update({status:'sending'}).eq('id',reminder.id).eq('status','ready').select('id');if(claimed.error)throw claimed.error;if(!claimed.data?.length)continue;
   const items=reminder.payload.items as {invoice_id:string;label:string;amount_cents:number;paid_cents:number}[];
   const text=`EDUCAR\nOutstanding: ARS ${(reminder.payload.total_cents/100).toFixed(2)}\n${items.map(i=>`${i.label}: ARS ${((i.amount_cents-i.paid_cents)/100).toFixed(2)} (invoice ${i.invoice_id})`).join('\n')}`;
-  // shortcut: attach an itemized invoice CSV; replace with institutional PDF invoices before production acceptance.
-  const invoice=items.map(i=>[i.invoice_id,JSON.stringify(i.label),i.amount_cents,i.paid_cents].join(',')).join('\n');
+  const attachments=[];
+  if(reminder.kind==='month_end')for(const invoiceId of [...new Set(items.map(i=>i.invoice_id))]){
+   const pdf=await PDFDocument.create();const font=await pdf.embedFont(StandardFonts.Helvetica);let page=pdf.addPage([595,842]);let y=790;
+   const line=(value:string)=>{if(y<50){page=pdf.addPage([595,842]);y=790;}page.drawText(value.normalize('NFKD').replace(/[^\x20-\x7E]/g,'').slice(0,95),{x:40,y,size:11,font});y-=22;};
+   line('EDUCAR - Invoice');line(`Invoice ${invoiceId}`);line(`Issued account statement ${date}`);line('Transfer payments require school verification.');
+   const rows=items.filter(i=>i.invoice_id===invoiceId);for(const item of rows){line(`${item.label}: ARS ${(item.amount_cents/100).toFixed(2)} / paid ${(item.paid_cents/100).toFixed(2)}`);}
+   line(`Outstanding ARS ${(rows.reduce((sum,i)=>sum+i.amount_cents-i.paid_cents,0)/100).toFixed(2)}`);
+   attachments.push({filename:`invoice-${invoiceId}.pdf`,content:await pdf.saveAsBase64()});
+  }
   try {
-   const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json','Idempotency-Key':`billing/${reminder.id}`},body:JSON.stringify({from:sender,to:[reminder.recipient],subject:reminder.kind==='debt'?'EDUCAR · Outstanding balance':'EDUCAR · Monthly invoice',text,attachments:reminder.kind==='month_end'?[{filename:`invoices-${date}.csv`,content:btoa(unescape(encodeURIComponent('invoice_id,concept,amount_cents,paid_cents\n'+invoice)))}]:[]}),signal:AbortSignal.timeout(15000)});
+   const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json','Idempotency-Key':`billing/${reminder.id}`},body:JSON.stringify({from:sender,to:[reminder.recipient],subject:reminder.kind==='debt'?'EDUCAR · Outstanding balance':'EDUCAR · Monthly invoice',text,attachments}),signal:AbortSignal.timeout(15000)});
    if(!response.ok){await client.from('billing_reminders').update({status:'failed'}).eq('id',reminder.id);continue;}
    const result=await response.json();const updated=await client.from('billing_reminders').update({status:'sent',provider_id:result.id}).eq('id',reminder.id);if(updated.error)throw updated.error;sent++;
   } catch { /* A sending row is intentionally retained for manual reconciliation after an ambiguous provider outcome. */ }
