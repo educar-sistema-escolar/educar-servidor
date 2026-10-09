@@ -22,10 +22,18 @@ insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types) v
 create policy "Families upload private receipts" on storage.objects for insert to authenticated with check(bucket_id='transfer-receipts' and (storage.foldername(name))[1]=auth.uid()::text and exists(select 1 from public.profiles where id=auth.uid() and is_active and account_status='active' and role::text in ('parent','guardian')));
 create policy "Families read own private receipt files" on storage.objects for select to authenticated using(bucket_id='transfer-receipts' and (storage.foldername(name))[1]=auth.uid()::text);
 create or replace function public.submit_transfer(p_invoice uuid,p_items uuid[],p_amount bigint,p_reference text,p_path text,p_filename text) returns uuid language plpgsql security definer set search_path=pg_catalog,public as $$
-declare result uuid; outstanding bigint; item_count integer;
+declare result uuid; outstanding bigint; item_count integer; existing public.transfer_submissions;
 begin
  if not public.can_read_invoice(p_invoice) or not exists(select 1 from public.profiles where id=auth.uid() and role::text in ('parent','guardian') and is_active and account_status='active') then raise exception 'Invoice access denied' using errcode='42501'; end if;
  perform 1 from public.invoices where id=p_invoice for update;
+ select * into existing from public.transfer_submissions where guardian_id=auth.uid() and reference=btrim(p_reference);
+ if existing.id is not null then
+  if existing.invoice_id=p_invoice and existing.amount_cents=p_amount
+   and (select array_agg(item_id order by item_id) from public.transfer_submission_items where submission_id=existing.id)=(select array_agg(x order by x) from unnest(p_items) x)
+   and exists(select 1 from public.transfer_receipts where submission_id=existing.id and storage_path=p_path and filename=p_filename)
+  then return existing.id; end if;
+  raise exception 'Transfer reference already belongs to a different operation';
+ end if;
  if p_items is null or cardinality(p_items)=0 or cardinality(p_items)<>(select count(distinct x) from unnest(p_items) x) then raise exception 'Select distinct pending concepts'; end if;
  select count(*),sum(amount_cents-paid_cents) into item_count,outstanding from public.invoice_items where invoice_id=p_invoice and id=any(p_items) and amount_cents>paid_cents;
  if item_count<>cardinality(p_items) or p_amount is null or p_amount<=0 or p_amount>outstanding then raise exception 'Invalid selected concepts or amount'; end if;
