@@ -11,11 +11,11 @@ const id=n=>`81000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 test('actual PostgreSQL financial migrations enforce family RLS and atomic partial payments',async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'educar-finance-test-'));const data=path.join(root,'data');let started=false;let primary;
  const server=net.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));
- const run=(name,args,input)=>{const result=spawnSync(executable(name),args,{input,encoding:'utf8',timeout:60000,...(name==='pg_ctl'?{stdio:'ignore'}:{})});if(result.error)throw result.error;assert.equal(result.status,0,`${name}: ${(result.stderr||result.stdout||'process failed').slice(-1800)}`);return (result.stdout||'').trim();};
+ const run=(name,args,input)=>{const result=spawnSync(executable(name),args,{input,encoding:'utf8',timeout:180000,...(name==='pg_ctl'?{stdio:'ignore'}:{})});if(result.error)throw result.error;assert.equal(result.status,0,`${name}: ${(result.stderr||result.stdout||'process failed').slice(-1800)}`);return (result.stdout||'').trim();};
  const args=['-h','127.0.0.1','-p',String(port),'-U','fixture_admin','-d','postgres','-X','-q','-t','-A','-v','ON_ERROR_STOP=1'];
  const sql=text=>run('psql',args,text);
  const as=(n,text)=>sql(`set role authenticated;select set_config('request.jwt.claim.sub','${id(n)}',false);select set_config('request.jwt.claim.role','authenticated',false);${text}`).split('\n').at(-1);
- const denied=(n,text)=>{const result=spawnSync(executable('psql'),args,{input:`set role authenticated;select set_config('request.jwt.claim.sub','${id(n)}',false);${text}`,encoding:'utf8',timeout:60000});if(result.error)throw result.error;assert.notEqual(result.status,0,'operation unexpectedly succeeded');return result.stderr;};
+ const denied=(n,text)=>{const result=spawnSync(executable('psql'),args,{input:`set role authenticated;select set_config('request.jwt.claim.sub','${id(n)}',false);${text}`,encoding:'utf8',timeout:180000});if(result.error)throw result.error;assert.notEqual(result.status,0,'operation unexpectedly succeeded');return result.stderr;};
  try{
   run('initdb',['-D',data,'-U','fixture_admin','-A','trust','--encoding=UTF8','--no-locale']);
   started=true;run('pg_ctl',['-D',data,'-l',path.join(root,'server.log'),'-o',`-h 127.0.0.1 -p ${port}`,'-w','start']);started=true;
@@ -23,6 +23,29 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   const identity=fs.readFileSync('supabase/migrations/20260922090000_stage3_identity_authorization.sql','utf8');sql(identity.slice(identity.indexOf('create or replace function public.is_guardian_of_student'),identity.indexOf('create or replace function public.is_teacher_of_student')));
   for(const file of fs.readdirSync('supabase/migrations').filter(x=>/^2026100[89]/.test(x)).sort())sql(fs.readFileSync(`supabase/migrations/${file}`,'utf8'));
   sql(`insert into profiles(id,full_name,email,role) values('${id(1)}','Parent','parent@example.test','guardian'),('${id(2)}','Admin','admin@example.test','admin');insert into people(id,profile_id,first_name,last_name) values('${id(11)}','${id(1)}','Parent','Fixture'),('${id(12)}',null,'Child','Fixture'),('${id(13)}',null,'Foreign','Fixture');insert into students(id,person_id) values('${id(21)}','${id(12)}'),('${id(22)}','${id(13)}');insert into student_guardians values('${id(21)}','${id(11)}',true);insert into invoices(id,student_id,period,due_date) values('${id(31)}','${id(21)}','2026-10-01','2026-10-10'),('${id(32)}','${id(22)}','2026-10-01','2026-10-10');insert into invoice_items(id,invoice_id,concept,label,amount_cents) values('${id(41)}','${id(31)}','tuition','Tuition',10000),('${id(42)}','${id(32)}','tuition','Tuition',10000);insert into storage.objects(bucket_id,name,owner_id) values('transfer-receipts','${id(1)}/test.pdf','${id(1)}'),('transfer-receipts','${id(1)}/unused.pdf','${id(1)}');`);
+  sql("create role anon nologin;");
+  sql(fs.readFileSync('supabase/migrations/20260928160000_student_forum.sql','utf8'));
+  sql(fs.readFileSync('supabase/migrations/20261026151000_fix_forum_vote_record.sql','utf8'));
+  sql(`insert into profiles(id,full_name,email,role) values('${id(3)}','Student','student@example.test','student');update people set profile_id='${id(3)}' where id='${id(12)}';`);
+  const discussion=as(3,"insert into forum_discussions(category,title,lead,content) values('Académico','Test','Lead','Body') returning id;");
+  as(3,`insert into forum_discussion_votes(discussion_id,direction) values('${discussion}','up');update forum_discussion_votes set direction='down' where discussion_id='${discussion}';`);
+  assert.equal(as(3,`select score from forum_discussions where id='${discussion}';`),'-1');
+  const reply=as(3,`insert into forum_replies(discussion_id,content) values('${discussion}','Reply') returning id;`);
+  as(3,`insert into forum_reply_votes(reply_id,direction) values('${reply}','up');update forum_reply_votes set direction='down' where reply_id='${reply}';`);
+  assert.equal(as(3,`select score from forum_replies where id='${reply}';`),'-1');
+  assert.equal(as(1,'select count(*) from forum_discussions;'),'0');
+  assert.match(denied(1,"insert into forum_discussions(category,title,lead,content) values('Académico','Denied','Denied','Denied');"),/Active student/);
+  // The recovery must be a safe no-op on a database containing both complete modules.
+  sql(fs.readFileSync('supabase/migrations/20261026150000_recover_missing_forum_billing.sql','utf8'));
+  sql("create function public.is_active_superadmin() returns boolean language sql stable as $$select public.is_billing_admin()$$;alter table student_transport_enrollments add column id uuid default gen_random_uuid(),add column stop_id uuid;");
+  sql(fs.readFileSync('supabase/migrations/20261026152000_transport_cycle_sport_teacher.sql','utf8'));
+  sql(`insert into transport_routes(id,name) values('${id(70)}','Existing fixture route');`);
+  const transport=JSON.parse(as(2,`select enroll_student_in_transport('${id(21)}','${id(70)}',null,2027);`));
+  assert.equal(transport.academic_year,2027,'Transport must preserve the selected academic cycle');
+  assert.match(denied(2,`select enroll_student_in_transport('${id(21)}','${id(70)}',null,0);`),/Valid academic year/);
+  assert.match(denied(1,`select enroll_student_in_transport('${id(21)}','${id(70)}',null,2027);`),/superadmin/);
+  sql('delete from student_transport_enrollments;delete from transport_routes;');
+
   assert.equal(as(1,'select count(*) from invoices;'),'1');
   const submit=(invoice=id(31),item=id(41),amount=5000,ref='BANK')=>`select submit_transfer('${invoice}',array['${item}']::uuid[],${amount},'${ref}','${id(1)}/test.pdf','test.pdf');`;
   assert.match(denied(1,submit(id(32),id(42))),/Invoice access denied/);

@@ -1,8 +1,9 @@
-import { createClient } from 'npm:@supabase/supabase-js@2';
+import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
 const allowedRoles = new Set(['superadmin', 'teacher', 'parent', 'guardian', 'student']);
@@ -53,6 +54,7 @@ function isPlainPayload(value: unknown): value is ProvisionPayload {
 function hasValidName(value: string) {
   return value.length >= 2
     && value.length <= 160
+    // deno-lint-ignore no-control-regex -- Names must reject control characters.
     && !/[\u0000-\u001f\u007f]/.test(value)
     && value.split(/\s+/).filter(Boolean).length >= 2;
 }
@@ -67,7 +69,7 @@ function safeProvisionError(status: number) {
 }
 
 async function compensateNewIdentity(
-  adminClient: ReturnType<typeof createClient>,
+  adminClient: SupabaseClient,
   linkedIdentity: LinkedIdentity | null,
   authUserId: string,
 ) {

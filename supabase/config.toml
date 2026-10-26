@@ -1,5 +1,10 @@
-# Supabase CLI configuration placeholder.
-# Generate the local project configuration with `supabase init` when the CLI is adopted.
+# Project selection is explicit in deploy/link commands; never infer a remote target.
+
+# The handler validates the session with Auth getUser and requires an active
+# superadmin. This supports signing keys beyond the gateway's legacy JWT check.
+[functions.admin-provision-user]
+verify_jwt = false
+entrypoint = "./functions/admin-provision-user/index.ts"
 
 # Custom scheduler authentication is checked inside the function.
 [functions.billing-reminders]
