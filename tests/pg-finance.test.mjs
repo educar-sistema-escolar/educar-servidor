@@ -24,6 +24,7 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   for(const file of fs.readdirSync('supabase/migrations').filter(x=>/^2026100[89]/.test(x)).sort())sql(fs.readFileSync(`supabase/migrations/${file}`,'utf8'));
   sql(`insert into profiles(id,full_name,email,role) values('${id(1)}','Parent','parent@example.test','guardian'),('${id(2)}','Admin','admin@example.test','admin');insert into people(id,profile_id,first_name,last_name) values('${id(11)}','${id(1)}','Parent','Fixture'),('${id(12)}',null,'Child','Fixture'),('${id(13)}',null,'Foreign','Fixture');insert into students(id,person_id) values('${id(21)}','${id(12)}'),('${id(22)}','${id(13)}');insert into student_guardians values('${id(21)}','${id(11)}',true);insert into invoices(id,student_id,period,due_date) values('${id(31)}','${id(21)}','2026-10-01','2026-10-10'),('${id(32)}','${id(22)}','2026-10-01','2026-10-10');insert into invoice_items(id,invoice_id,concept,label,amount_cents) values('${id(41)}','${id(31)}','tuition','Tuition',10000),('${id(42)}','${id(32)}','tuition','Tuition',10000);insert into storage.objects(bucket_id,name,owner_id) values('transfer-receipts','${id(1)}/test.pdf','${id(1)}'),('transfer-receipts','${id(1)}/unused.pdf','${id(1)}');`);
   sql("create role anon nologin;");
+  sql(fs.readFileSync('supabase/migrations/20261103191021_billing_reminder_delivery_audit.sql','utf8'));
   sql(fs.readFileSync('supabase/migrations/20260928160000_student_forum.sql','utf8'));
   sql(fs.readFileSync('supabase/migrations/20261026151000_fix_forum_vote_record.sql','utf8'));
   sql(`insert into profiles(id,full_name,email,role) values('${id(3)}','Student','student@example.test','student');update people set profile_id='${id(3)}' where id='${id(12)}';`);
@@ -52,6 +53,12 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   assert.match(denied(1,submit(id(31),id(42))),/Invalid selected/);
   const operation=as(1,submit());assert.match(operation,/^[\da-f-]{36}$/);
   assert.equal(as(1,submit()),operation);assert.equal(as(1,'select paid_cents from invoice_items;'),'0');
+  sql(`insert into storage.objects(bucket_id,name,owner_id) values('transfer-receipts','${id(1)}/second.pdf','${id(1)}');`);
+  const receipt=as(1,`select attach_transfer_receipt('${operation}','${id(1)}/second.pdf','second.pdf');`);
+  assert.match(receipt,/^[\da-f-]{36}$/);
+  assert.equal(as(1,`select attach_transfer_receipt('${operation}','${id(1)}/second.pdf','second.pdf');`),receipt,'Receipt retries are idempotent');
+  assert.equal(as(1,`select count(*) from transfer_receipts where submission_id='${operation}';`),'2','One pending operation keeps both receipts');
+  assert.equal(as(1,'select paid_cents from invoice_items;'),'0','Attaching receipts does not credit a payment');
   assert.equal(as(1,`select count(*) from transfer_submissions;`),'1');
   assert.match(denied(1,submit(id(31),id(41),4000)),/different operation/);
   assert.equal(as(1,`delete from storage.objects where name='${id(1)}/test.pdf' returning name;`),'authenticated');
@@ -78,6 +85,18 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   const reviewed=await reviewing;assert.equal(reviewed.code,0);const attached=await attachment;assert.notEqual(attached.code,0);assert.match(attached.stderr,/Submission access denied/);
   assert.equal(sql(`select paid_cents from invoice_items where id='${pendingItem}';`),'1000');
   sql(`update invoice_items set paid_cents=amount_cents where invoice_id='${id(31)}';insert into invoices(id,student_id,period,due_date) values('${id(33)}','${id(21)}','2026-09-01','2026-09-10');insert into invoice_items(invoice_id,concept,label,amount_cents) values('${id(33)}','tuition','Old debt',2000);select set_config('request.jwt.claim.role','service_role',false);select prepare_billing_reminders('2026-10-30');`);assert.equal(sql("select count(*) from billing_reminders where kind='month_end' and reminder_date='2026-10-30';"),'1','Paid current month must still receive its invoice');assert.equal(sql("select payload->>'total_cents' from billing_reminders where kind='month_end' and reminder_date='2026-10-30';"),'0','Monthly total excludes historic debt');
+  sql(`select set_config('request.jwt.claim.role','service_role',false);select prepare_billing_reminders('2026-10-20');`);
+  const debtReminder=sql("select id from billing_reminders where kind='debt' and reminder_date='2026-10-20';");
+  const fresh=JSON.parse(sql(`select set_config('request.jwt.claim.role','service_role',false);select refresh_billing_reminder('${debtReminder}');`).split('\n').at(-1));
+  assert.equal(fresh.payload.total_cents,2000);assert.equal(fresh.payload.items.length,1);
+  sql(`update invoice_items set paid_cents=amount_cents where invoice_id='${id(33)}';`);
+  assert.equal(sql(`select set_config('request.jwt.claim.role','service_role',false);select refresh_billing_reminder('${debtReminder}') is null;`).split('\n').at(-1),'t','Settled debt cannot be delivered from a stale queue snapshot');
+  sql(`update profiles set is_active=false where id='${id(1)}';`);
+  const monthlyReminder=sql("select id from billing_reminders where kind='month_end' limit 1;");
+  assert.equal(sql(`select set_config('request.jwt.claim.role','service_role',false);select refresh_billing_reminder('${monthlyReminder}') is null;`).split('\n').at(-1),'t','Revoked recipient cannot receive queued invoices');
+  assert.match(denied(1,`select refresh_billing_reminder('${monthlyReminder}');`),/permission denied/);
+  sql(`update profiles set is_active=true where id='${id(1)}';insert into billing_non_business_days(day,label) values('2026-10-30','Institutional holiday');select set_config('request.jwt.claim.role','service_role',false);select prepare_billing_reminders('2026-10-29');select prepare_billing_reminders('2026-10-29');`);
+  assert.equal(sql("select count(*) from billing_reminders where kind='month_end' and reminder_date='2026-10-29';"),'1','Holiday-aware final business day and duplicate prevention');
   console.log('PG18 financial migrations, authenticated RLS, partial allocation, idempotency and two-connection locking PASS. Supabase platform compatibility fixtures only.');
  }catch(error){primary=error;throw error;
  }finally{

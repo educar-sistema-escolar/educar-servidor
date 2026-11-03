@@ -55,3 +55,13 @@ Docker daemon was unavailable during the iteration; the attempted `supabase test
 - [Supabase Auth redirect URLs](https://supabase.com/docs/guides/auth/redirect-urls)
 - [Resend idempotency keys](https://resend.com/docs/dashboard/emails/idempotency-keys)
 - [Expo SDK57 navigation migration](https://docs.expo.dev/router/migrate/sdk-55-to-56/)
+
+## Actualización 3 de noviembre de 2026: worker con auditoría y modo de prueba
+
+La migración local `20261103191021_billing_reminder_delivery_audit.sql` agrega contador, fecha y error del último intento a la cola existente. La función de servidor vuelve a consultar vínculos activos y saldos aprobados antes del envío; una deuda saldada o una relación revocada se excluye. El cambio requiere migración y worker de la misma versión. No se aplicó al proyecto remoto ni se desplegó el worker.
+
+Enviar al endpoint una solicitud autenticada con `BILLING_CRON_SECRET` y cuerpo `{"dry_run":true}` devuelve previsualizaciones y PDF en base64 de filas ya existentes en estado `ready`, sin enviar correos ni modificar cola. Solo usar en entorno aislado con datos DEMO: la respuesta contiene información de facturación. El modo prueba no crea filas; para probar la preparación usar la función SQL en una transacción reversible en una base aislada. Si no hay proveedor real configurado el modo normal falla sin marcar entregas como enviadas. El modo prueba fue verificado con dobles de red y PDF, no en Deno desplegado.
+
+Cada intento registra categoría de error sin datos sensibles. Una respuesta ambigua queda en `sending` para reconciliación manual. El control de idempotencia no elimina la posibilidad de que un pago se apruebe después de la última lectura y antes de la aceptación del correo: el mensaje refleja el saldo consultado antes del envío. Se debe mantener el calendario de feriados institucional, que estaba vacío en la consulta remota del 03/11/2026. La consulta de `pg_extension` confirmó que `pg_cron` no estaba instalado en ese momento; verificar también cualquier programador externo antes de activarlo.
+
+PostgreSQL 18 local con fixtures de compatibilidad pasó pruebas de saldos, RLS, duplicados, bloqueo concurrente, feriado, idempotencia, exclusión de deuda saldada y revocación. No equivale a probar Supabase Storage ni correo real.

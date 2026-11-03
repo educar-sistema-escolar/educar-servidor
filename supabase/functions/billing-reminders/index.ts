@@ -10,11 +10,15 @@ Deno.serve(async (request) => {
         return new Response('Unauthorized', { status: 401 });
     try {
         const client = createClient(required('SUPABASE_URL'), required('SUPABASE_SERVICE_ROLE_KEY'));
-        const apiKey = required('RESEND_API_KEY');
-        const sender = required('BILLING_FROM_EMAIL');
+        let input: { dry_run?: boolean } = {};
+        const body = await request.text();
+        if (body) { try { input=JSON.parse(body); } catch { return Response.json({error:'Invalid JSON body'},{status:400}); } }
+        const dryRun = input.dry_run === true;
+        const apiKey = dryRun ? '' : required('RESEND_API_KEY');
+        const sender = dryRun ? '' : required('BILLING_FROM_EMAIL');
         const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Buenos_Aires', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
         let preparedCount = 0;
-        for (let days = 6; days >= 0; days--) {
+        for (let days = dryRun ? -1 : 6; days >= 0; days--) {
             const day = new Date(`${date}T12:00:00Z`);
             day.setUTCDate(day.getUTCDate() - days);
             const prepared = await client.rpc('prepare_billing_reminders', { p_date: day.toISOString().slice(0, 10) });
@@ -26,13 +30,25 @@ Deno.serve(async (request) => {
         if (error)
             throw error;
         let sent = 0;
+        const previews: unknown[] = [];
         let queueFailure = false;
         for (const reminder of queue ?? []) {
-            const claimed = await client.from('billing_reminders').update({ status: 'sending' }).eq('id', reminder.id).eq('status', 'ready').select('id');
-            if (claimed.error)
-                throw claimed.error;
-            if (!claimed.data?.length)
+            if (!dryRun) {
+                const claimed = await client.from('billing_reminders').update({ status: 'sending', attempts: (reminder.attempts ?? 0)+1, last_attempt_at: new Date().toISOString(), last_error: null }).eq('id', reminder.id).eq('status', 'ready').select('id');
+                if (claimed.error) throw claimed.error;
+                if (!claimed.data?.length) continue;
+            }
+            const fresh = await client.rpc('refresh_billing_reminder', {p_reminder:reminder.id});
+            if (fresh.error) {
+                if (!dryRun) {const reset=await client.from('billing_reminders').update({status:'ready',last_error:'context_refresh_failed'}).eq('id',reminder.id);if(reset.error)queueFailure=true;}
                 continue;
+            }
+            if (!fresh.data) {
+                if (!dryRun) {const skipped=await client.from('billing_reminders').update({status:'failed',last_error:'no_eligible_recipient_or_debt'}).eq('id',reminder.id);if(skipped.error)queueFailure=true;}
+                continue;
+            }
+            reminder.payload=fresh.data.payload;
+            reminder.recipient=fresh.data.recipient;
             const items = reminder.payload.items as {
                 invoice_id: string;
                 student_name: string;
@@ -42,7 +58,8 @@ Deno.serve(async (request) => {
                 amount_cents: number;
                 paid_cents: number;
             }[];
-            const text = `EDUCAR\nOutstanding: ARS ${(reminder.payload.total_cents / 100).toFixed(2)}\n${items.map(i => `${i.label}: ARS ${((i.amount_cents - i.paid_cents) / 100).toFixed(2)} (invoice ${i.invoice_id})`).join('\n')}`;
+            const visibleItems = reminder.kind === 'debt' ? items.filter(i => i.amount_cents > i.paid_cents) : items;
+            const text = `Hola ${reminder.payload.name ?? ''}:\n\n${reminder.kind === 'debt' ? 'Te recordamos los importes pendientes:' : 'Te enviamos el detalle del período y los estados de cuenta adjuntos:'}\n\n${visibleItems.map(i => `${i.student_name} · período ${i.period} · vencimiento ${i.due_date}\n${i.label}: ARS ${(i.amount_cents / 100).toFixed(2)} · pendiente ARS ${((i.amount_cents - i.paid_cents) / 100).toFixed(2)}`).join('\n\n')}\n\nTotal pendiente: ARS ${(reminder.payload.total_cents / 100).toFixed(2)}\n\nLas transferencias quedan sujetas a verificación de la institución.\nEducar para Transformar`;
             const attachments = [];
             try {
                 if (reminder.kind === 'month_end')
@@ -55,43 +72,49 @@ Deno.serve(async (request) => {
                             page = pdf.addPage([595, 842]);
                             y = 790;
                         } page.drawText(value.normalize('NFKD').replace(/[^\x20-\x7E]/g, '').slice(0, 95), { x: 40, y, size: 11, font }); y -= 22; };
-                        line('EDUCAR - Invoice');
-                        line(`Invoice ${invoiceId}`);
-                        line(`Issued account statement ${date}`);
-                        line('Transfer payments require school verification.');
+                        line('EDUCAR - Estado de cuenta');
+                        line(`Factura ${invoiceId}`);
+                        line(`Estado emitido ${date}`);
+                        line('Las transferencias requieren verificacion de la escuela.');
                         const rows = items.filter(i => i.invoice_id === invoiceId);
-                        line(`Student: ${rows[0]?.student_name ?? 'Unknown'}`);
-                        line(`Period: ${rows[0]?.period ?? 'Unknown'}`);
-                        line(`Due date: ${rows[0]?.due_date ?? 'Unknown'}`);
+                        line(`Alumno: ${rows[0]?.student_name ?? 'Unknown'}`);
+                        line(`Periodo: ${rows[0]?.period ?? 'Unknown'}`);
+                        line(`Vencimiento: ${rows[0]?.due_date ?? 'Unknown'}`);
                         for (const item of rows) {
-                            line(`${item.label}: ARS ${(item.amount_cents / 100).toFixed(2)} / paid ${(item.paid_cents / 100).toFixed(2)}`);
+                            line(`${item.label}: ARS ${(item.amount_cents / 100).toFixed(2)} / pagado ${(item.paid_cents / 100).toFixed(2)}`);
                         }
-                        line(`Outstanding ARS ${(rows.reduce((sum, i) => sum + i.amount_cents - i.paid_cents, 0) / 100).toFixed(2)}`);
+                        line(`Saldo pendiente ARS ${(rows.reduce((sum, i) => sum + i.amount_cents - i.paid_cents, 0) / 100).toFixed(2)}`);
                         attachments.push({ filename: `invoice-${invoiceId}.pdf`, content: await pdf.saveAsBase64() });
                     }
             }
             catch {
-                const reset = await client.from('billing_reminders').update({ status: 'ready' }).eq('id', reminder.id);
-                if (reset.error) queueFailure = true;
+                if (!dryRun) { const reset = await client.from('billing_reminders').update({ status: 'ready', last_error:'pdf_generation_failed' }).eq('id', reminder.id);
+                if (reset.error) queueFailure = true; }
                 continue;
             }
+            if (dryRun) { previews.push({id:reminder.id,kind:reminder.kind,text,attachments});continue; }
             try {
-                const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `billing/${reminder.id}` }, body: JSON.stringify({ from: sender, to: [reminder.recipient], subject: reminder.kind === 'debt' ? 'EDUCAR · Outstanding balance' : 'EDUCAR · Monthly invoice', text, attachments }), signal: AbortSignal.timeout(15000) });
+                const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `billing/${reminder.id}` }, body: JSON.stringify({ from: sender, to: [reminder.recipient], subject: reminder.kind === 'debt' ? 'Educar · Recordatorio de saldo pendiente' : 'Educar · Estado de cuenta mensual', text, attachments }), signal: AbortSignal.timeout(15000) });
                 if (!response.ok) {
                     const status = response.status === 429 ? 'ready' : response.status >= 500 || response.status === 408 ? 'sending' : 'failed';
-                    const rejected = await client.from('billing_reminders').update({ status }).eq('id', reminder.id);
+                    const rejected = await client.from('billing_reminders').update({ status, last_error:`provider_http_${response.status}` }).eq('id', reminder.id);
                     if (rejected.error) queueFailure = true;
                     continue;
                 }
                 const result = await response.json();
+                if (typeof result.id !== 'string' || !result.id) throw new Error('Missing provider receipt');
                 const updated = await client.from('billing_reminders').update({ status: 'sent', provider_id: result.id }).eq('id', reminder.id);
                 if (updated.error) { queueFailure = true; throw updated.error; }
                 sent++;
             }
-            catch { /* A sending row is intentionally retained for manual reconciliation after an ambiguous provider outcome. */ }
+            catch {
+                // An ambiguous provider outcome must never be replayed automatically.
+                const held=await client.from('billing_reminders').update({last_error:'provider_outcome_ambiguous'}).eq('id',reminder.id);
+                if(held.error)queueFailure=true;
+            }
         }
         if (queueFailure) throw new Error('Queue state could not be persisted.');
-        return Response.json({ prepared: preparedCount, sent });
+        return Response.json(dryRun ? {dry_run:true,prepared:0,sent:0,previews} : { prepared: preparedCount, sent });
     }
     catch {
         return Response.json({ error: 'Reminder processing failed; inspect server configuration and queue.' }, { status: 500 });
