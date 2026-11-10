@@ -6,6 +6,9 @@
 verify_jwt = false
 entrypoint = "./functions/admin-provision-user/index.ts"
 
-# Custom scheduler authentication is checked inside the function.
+# The gateway validates a JWT and the function checks its scheduler secret.
 [functions.billing-reminders]
-verify_jwt = false
+verify_jwt = true
+
+[functions.billing-reminder-demo]
+verify_jwt = true

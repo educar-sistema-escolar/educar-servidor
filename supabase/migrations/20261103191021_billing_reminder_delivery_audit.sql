@@ -1,8 +1,8 @@
 begin;
 alter table public.billing_reminders
-  add column attempts integer not null default 0 check (attempts >= 0),
-  add column last_attempt_at timestamptz,
-  add column last_error text;
+  add column if not exists attempts integer not null default 0 check (attempts >= 0),
+  add column if not exists last_attempt_at timestamptz,
+  add column if not exists last_error text;
 
 -- Recheck current family links and approved balances immediately before delivery.
 create or replace function public.refresh_billing_reminder(p_reminder uuid)

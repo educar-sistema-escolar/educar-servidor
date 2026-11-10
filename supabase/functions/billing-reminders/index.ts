@@ -6,19 +6,29 @@ Deno.serve(async (request) => {
     if (request.method !== 'POST')
         return new Response('Method not allowed', { status: 405 });
     const secret = Deno.env.get('BILLING_CRON_SECRET');
-    if (!secret || request.headers.get('Authorization') !== `Bearer ${secret}`)
+    if (!secret || request.headers.get('x-billing-secret') !== secret)
         return new Response('Unauthorized', { status: 401 });
     try {
         const client = createClient(required('SUPABASE_URL'), required('SUPABASE_SERVICE_ROLE_KEY'));
-        let input: { dry_run?: boolean } = {};
+        let input: { dry_run?: boolean; demo_run_id?: string } = {};
         const body = await request.text();
         if (body) { try { input=JSON.parse(body); } catch { return Response.json({error:'Invalid JSON body'},{status:400}); } }
         const dryRun = input.dry_run === true;
+        const demoRun = typeof input.demo_run_id === 'string' ? input.demo_run_id : null;
+        if (demoRun && (dryRun || Deno.env.get('BILLING_DELIVERY_MODE') !== 'demo'))
+            return Response.json({ error: 'Demo mode is unavailable.' }, { status: 403 });
+        if (!dryRun && Deno.env.get('BILLING_SEND_ENABLED') !== 'true')
+            return Response.json({ error: 'Reminder delivery is disabled.' }, { status: 503 });
+        // A demo deployment must be confined to one known fixture and its own mailbox.
+        const demoGuardian = Deno.env.get('BILLING_DEMO_GUARDIAN_ID');
+        const demoRecipient = Deno.env.get('BILLING_DEMO_RECIPIENT');
+        if (!dryRun && Deno.env.get('BILLING_DELIVERY_MODE') !== 'live' && (!demoGuardian || !demoRecipient))
+            return Response.json({ error: 'Demo delivery is not configured.' }, { status: 503 });
         const apiKey = dryRun ? '' : required('RESEND_API_KEY');
         const sender = dryRun ? '' : required('BILLING_FROM_EMAIL');
         const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Buenos_Aires', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
         let preparedCount = 0;
-        for (let days = dryRun ? -1 : 6; days >= 0; days--) {
+        for (let days = dryRun || demoRun ? -1 : 6; days >= 0; days--) {
             const day = new Date(`${date}T12:00:00Z`);
             day.setUTCDate(day.getUTCDate() - days);
             const prepared = await client.rpc('prepare_billing_reminders', { p_date: day.toISOString().slice(0, 10) });
@@ -26,7 +36,14 @@ Deno.serve(async (request) => {
                 throw prepared.error;
             preparedCount += prepared.data ?? 0;
         }
-        const { data: queue, error } = await client.from('billing_reminders').select('*').eq('status', 'ready').lte('reminder_date', date).order('reminder_date').limit(50);
+        const table = demoRun ? 'billing_demo_runs' : 'billing_reminders';
+        let query = client.from(table).select('*').eq('status', 'ready').lte('reminder_date', date);
+        if (demoRun) query = query.eq('id', demoRun);
+        if (Deno.env.get('BILLING_DELIVERY_MODE') !== 'live') {
+            if (!demoGuardian) return Response.json({ error: 'Demo delivery is not configured.' }, { status: 503 });
+            query = query.eq('guardian_id', demoGuardian);
+        }
+        const { data: queue, error } = await query.order('reminder_date').limit(50);
         if (error)
             throw error;
         let sent = 0;
@@ -34,23 +51,28 @@ Deno.serve(async (request) => {
         let queueFailure = false;
         for (const reminder of queue ?? []) {
             if (!dryRun) {
-                const claimed = await client.from('billing_reminders').update({ status: 'sending', attempts: (reminder.attempts ?? 0)+1, last_attempt_at: new Date().toISOString(), last_error: null }).eq('id', reminder.id).eq('status', 'ready').select('id');
+                const claimed = await client.from(table).update({ status: 'sending', attempts: (reminder.attempts ?? 0)+1, last_attempt_at: new Date().toISOString(), last_error: null }).eq('id', reminder.id).eq('status', 'ready').select('id');
                 if (claimed.error) throw claimed.error;
                 if (!claimed.data?.length) continue;
             }
-            const fresh = await client.rpc('refresh_billing_reminder', {p_reminder:reminder.id});
+            const fresh = await client.rpc('refresh_billing_reminder', {p_reminder:demoRun ? reminder.source_reminder_id : reminder.id});
             if (fresh.error) {
-                if (!dryRun) {const reset=await client.from('billing_reminders').update({status:'ready',last_error:'context_refresh_failed'}).eq('id',reminder.id);if(reset.error)queueFailure=true;}
+                if (!dryRun) {const reset=await client.from(table).update({status:demoRun?'failed':'ready',last_error:'context_refresh_failed'}).eq('id',reminder.id);if(reset.error)queueFailure=true;}
                 continue;
             }
             if (!fresh.data) {
-                if (!dryRun) {const skipped=await client.from('billing_reminders').update({status:'failed',last_error:'no_eligible_recipient_or_debt'}).eq('id',reminder.id);if(skipped.error)queueFailure=true;}
+                if (!dryRun) {const skipped=await client.from(table).update({status:'failed',last_error:'no_eligible_recipient_or_debt'}).eq('id',reminder.id);if(skipped.error)queueFailure=true;}
                 continue;
             }
             reminder.payload=fresh.data.payload;
             reminder.recipient=fresh.data.recipient;
+            if (Deno.env.get('BILLING_DELIVERY_MODE') !== 'live' && reminder.recipient.toLowerCase() !== demoRecipient?.toLowerCase()) {
+                if (!dryRun) { const blocked = await client.from(table).update({ status:'failed',last_error:'demo_recipient_mismatch' }).eq('id',reminder.id); if (blocked.error) queueFailure=true; }
+                continue;
+            }
             const items = reminder.payload.items as {
                 invoice_id: string;
+                student_id: string;
                 student_name: string;
                 period: string;
                 due_date: string;
@@ -58,6 +80,11 @@ Deno.serve(async (request) => {
                 amount_cents: number;
                 paid_cents: number;
             }[];
+            if (demoRun && (!items.length || items.some(i => i.student_id !== '00000000-0000-4000-8000-00000000e904' || i.invoice_id !== '00000000-0000-4000-8000-00000000e905'))) {
+                const blocked = await client.from(table).update({ status:'failed',last_error:'demo_data_mismatch' }).eq('id',reminder.id);
+                if (blocked.error) queueFailure=true;
+                continue;
+            }
             const visibleItems = reminder.kind === 'debt' ? items.filter(i => i.amount_cents > i.paid_cents) : items;
             const text = `Hola ${reminder.payload.name ?? ''}:\n\n${reminder.kind === 'debt' ? 'Te recordamos los importes pendientes:' : 'Te enviamos el detalle del período y los estados de cuenta adjuntos:'}\n\n${visibleItems.map(i => `${i.student_name} · período ${i.period} · vencimiento ${i.due_date}\n${i.label}: ARS ${(i.amount_cents / 100).toFixed(2)} · pendiente ARS ${((i.amount_cents - i.paid_cents) / 100).toFixed(2)}`).join('\n\n')}\n\nTotal pendiente: ARS ${(reminder.payload.total_cents / 100).toFixed(2)}\n\nLas transferencias quedan sujetas a verificación de la institución.\nEducar para Transformar`;
             const attachments = [];
@@ -88,7 +115,7 @@ Deno.serve(async (request) => {
                     }
             }
             catch {
-                if (!dryRun) { const reset = await client.from('billing_reminders').update({ status: 'ready', last_error:'pdf_generation_failed' }).eq('id', reminder.id);
+                if (!dryRun) { const reset = await client.from(table).update({ status: demoRun?'failed':'ready', last_error:'pdf_generation_failed' }).eq('id', reminder.id);
                 if (reset.error) queueFailure = true; }
                 continue;
             }
@@ -96,20 +123,20 @@ Deno.serve(async (request) => {
             try {
                 const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': `billing/${reminder.id}` }, body: JSON.stringify({ from: sender, to: [reminder.recipient], subject: reminder.kind === 'debt' ? 'Educar · Recordatorio de saldo pendiente' : 'Educar · Estado de cuenta mensual', text, attachments }), signal: AbortSignal.timeout(15000) });
                 if (!response.ok) {
-                    const status = response.status === 429 ? 'ready' : response.status >= 500 || response.status === 408 ? 'sending' : 'failed';
-                    const rejected = await client.from('billing_reminders').update({ status, last_error:`provider_http_${response.status}` }).eq('id', reminder.id);
+                    const status = response.status === 429 ? (demoRun ? 'failed' : 'ready') : response.status >= 500 || response.status === 408 ? 'sending' : 'failed';
+                    const rejected = await client.from(table).update({ status, last_error:`provider_http_${response.status}` }).eq('id', reminder.id);
                     if (rejected.error) queueFailure = true;
                     continue;
                 }
                 const result = await response.json();
                 if (typeof result.id !== 'string' || !result.id) throw new Error('Missing provider receipt');
-                const updated = await client.from('billing_reminders').update({ status: 'sent', provider_id: result.id }).eq('id', reminder.id);
+                const updated = await client.from(table).update({ status: 'sent', provider_id: result.id }).eq('id', reminder.id);
                 if (updated.error) { queueFailure = true; throw updated.error; }
                 sent++;
             }
             catch {
                 // An ambiguous provider outcome must never be replayed automatically.
-                const held=await client.from('billing_reminders').update({last_error:'provider_outcome_ambiguous'}).eq('id',reminder.id);
+                const held=await client.from(table).update({last_error:'provider_outcome_ambiguous'}).eq('id',reminder.id);
                 if(held.error)queueFailure=true;
             }
         }

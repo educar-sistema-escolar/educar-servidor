@@ -97,6 +97,17 @@ test('actual PostgreSQL financial migrations enforce family RLS and atomic parti
   assert.match(denied(1,`select refresh_billing_reminder('${monthlyReminder}');`),/permission denied/);
   sql(`update profiles set is_active=true where id='${id(1)}';insert into billing_non_business_days(day,label) values('2026-10-30','Institutional holiday');select set_config('request.jwt.claim.role','service_role',false);select prepare_billing_reminders('2026-10-29');select prepare_billing_reminders('2026-10-29');`);
   assert.equal(sql("select count(*) from billing_reminders where kind='month_end' and reminder_date='2026-10-29';"),'1','Holiday-aware final business day and duplicate prevention');
+  sql(fs.readFileSync('supabase/migrations/20261109230000_billing_demo_runs.sql','utf8'));
+  sql(fs.readFileSync('supabase/migrations/20261109230000_billing_demo_runs.sql','utf8'));
+  const demoGuardian='00000000-0000-4000-8000-00000000e901';
+  sql(`insert into profiles(id,full_name,email,role) values('${demoGuardian}','Demo','demo@example.test','parent');insert into billing_reminders(guardian_id,kind,reminder_date,recipient,payload,status) values('${demoGuardian}','debt','2026-10-20','demo@example.test','{}','sent');`);
+  assert.match(denied(1,"select create_billing_demo_run('debt');"),/Administrator required/);
+  const demoRun=as(2,"select create_billing_demo_run('debt');");
+  assert.match(demoRun,/^[\da-f-]{36}$/);
+  assert.equal(sql(`select count(*) from billing_demo_runs where id='${demoRun}' and guardian_id='${demoGuardian}';`),'1');
+  assert.match(denied(2,"select create_billing_demo_run('debt');"),/un minuto/);
+  sql(`update billing_demo_runs set created_at=now()-interval '2 minutes' where id='${demoRun}';`);
+  assert.match(denied(2,"select create_billing_demo_run('debt');"),/pendiente de revisión/);
   console.log('PG18 financial migrations, authenticated RLS, partial allocation, idempotency and two-connection locking PASS. Supabase platform compatibility fixtures only.');
  }catch(error){primary=error;throw error;
  }finally{
